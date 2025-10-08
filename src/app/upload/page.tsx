@@ -23,71 +23,42 @@ type SearchResponse = { results?: Hit[] };
 
 /* ---------------- Helpers ---------------- */
 
-/**
- * Robust: konvertiert ReactCrop-Crop (in % ODER px der gerenderten Bildgröße)
- * in Pixel relativ zur NATURAL size des Bildes.
- */
 function toPixelCrop(c: Crop, img: HTMLImageElement): PixelCrop {
   const naturalW = img.naturalWidth;
   const naturalH = img.naturalHeight;
-
-  // gerenderte (on-screen) Größe
   const renderedW = img.width || img.getBoundingClientRect().width || naturalW;
   const renderedH = img.height || img.getBoundingClientRect().height || naturalH;
-
   const scaleX = naturalW / renderedW;
   const scaleY = naturalH / renderedH;
-
   const isPct = c.unit === '%';
-
-  const rx = c.x ?? 0;
-  const ry = c.y ?? 0;
-  const rw = c.width ?? 0;
-  const rh = c.height ?? 0;
-
+  const rx = c.x ?? 0, ry = c.y ?? 0, rw = c.width ?? 0, rh = c.height ?? 0;
   const x = Math.round(isPct ? (rx / 100) * naturalW : rx * scaleX);
   const y = Math.round(isPct ? (ry / 100) * naturalH : ry * scaleY);
   const w = Math.round(isPct ? (rw / 100) * naturalW : rw * scaleX);
   const h = Math.round(isPct ? (rh / 100) * naturalH : rh * scaleY);
+  return { unit: 'px', x: Math.max(0, x), y: Math.max(0, y), width: Math.max(1, w), height: Math.max(1, h) };
+}
 
+function pixelToPercentCropWithSize(px: PixelCrop, naturalW: number, naturalH: number): Crop {
   return {
-    unit: 'px',
-    x: Math.max(0, x),
-    y: Math.max(0, y),
-    width: Math.max(1, w),
-    height: Math.max(1, h),
+    unit: '%',
+    x: (px.x / naturalW) * 100,
+    y: (px.y / naturalH) * 100,
+    width: (px.width / naturalW) * 100,
+    height: (px.height / naturalH) * 100,
   };
 }
 
-/**
- * Schneidet den Bereich 1:1 aus (Natural-Pixel), ohne DPR-Scaling.
- * Das ist stabil über Browser/Hosts hinweg und vermeidet "Zoom".
- */
 async function getCroppedBlob(img: HTMLImageElement, crop: PixelCrop): Promise<Blob> {
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(crop.width));
   canvas.height = Math.max(1, Math.round(crop.height));
-
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas context not available');
-
-  // sauberes Sampling
-  const sctx = ctx as CanvasRenderingContext2D & {
-    imageSmoothingEnabled?: boolean;
-    imageSmoothingQuality?: 'low' | 'medium' | 'high';
-  };
-  sctx.imageSmoothingEnabled = true;
-  sctx.imageSmoothingQuality = 'high';
-
-  ctx.drawImage(
-    img,
-    crop.x, crop.y, crop.width, crop.height, // Quelle (Natural-Pixel)
-    0, 0, canvas.width, canvas.height        // Ziel (1:1)
-  );
-
-  return await new Promise<Blob>((res) =>
-    canvas.toBlob((b) => res(b as Blob), 'image/jpeg', 0.92)
-  );
+  (ctx as any).imageSmoothingEnabled = true;
+  (ctx as any).imageSmoothingQuality = 'high';
+  ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+  return await new Promise<Blob>((res) => canvas.toBlob((b) => res(b as Blob), 'image/jpeg', 0.92));
 }
 
 const fmtPrice = (value?: number, currency = 'EUR', locale = 'de-DE') =>
@@ -101,15 +72,12 @@ function useToaster() {
   const [msg, setMsg] = useState<string | null>(null);
   const [type, setType] = useState<'ok' | 'err' | 'info'>('info');
   const timerRef = useRef<number | undefined>(undefined);
-
   const show = useCallback((m: string, t: 'ok' | 'err' | 'info' = 'info', ms = 2200) => {
     setMsg(m); setType(t);
     if (timerRef.current) window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => setMsg(null), ms);
   }, []);
-
   useEffect(() => () => { if (timerRef.current) window.clearTimeout(timerRef.current); }, []);
-
   return { msg, type, show };
 }
 function Toast({ msg, type }: { msg: string; type: 'ok' | 'err' | 'info' }) {
@@ -130,13 +98,13 @@ export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
 
-  // Zuschneiden (shared state)
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  // NATURAL size
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
+
+  // Zuschneiden (nur Modal)
+  const modalImgRef = useRef<HTMLImageElement | null>(null);
   const [crop, setCrop] = useState<Crop | undefined>();
   const [modalOpen, setModalOpen] = useState(false);
-
-  // Inline-Edit links
-  const [editInline, setEditInline] = useState(false);
 
   // Suche / Ergebnis
   const [loading, setLoading] = useState(false);
@@ -160,8 +128,6 @@ export default function UploadPage() {
   // Persistente Preview + letzter Crop
   const [cropPreviewUrl, setCropPreviewUrl] = useState<string | null>(null);
   const [lastCropBlob, setLastCropBlob] = useState<Blob | null>(null);
-
-  // Pixel-Crop für korrektes Seitenverhältnis der Preview
   const [cropPx, setCropPx] = useState<PixelCrop | null>(null);
 
   const toast = useToaster();
@@ -190,10 +156,11 @@ export default function UploadPage() {
     setVisibleCount(12);
     setSortBy('relevance');
     setError(null);
-    setCrop({ unit: '%', x: 12, y: 12, width: 76, height: 76 });
+    setCrop(undefined);      // Crop erst nach onLoad setzen
     setLastCropBlob(null);
     setCropPreviewUrl(null);
     setCropPx(null);
+    setNaturalSize(null);
     setLabelFilter({ Exact: true, 'Sehr ähnlich': true, Alternative: true });
     setPriceMin(''); setPriceMax(''); setMerchantSearch('');
     setModalOpen(true);
@@ -201,6 +168,20 @@ export default function UploadPage() {
 
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); handleFiles(e.dataTransfer.files); };
   const onDragOver = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); };
+
+  /* --------- Helpers: URL sicherstellen --------- */
+
+  const ensureImageUrl = useCallback(() => {
+    if (!file) return;
+    // wenn ObjectURL evtl. „tot“ ist → neue erzeugen
+    const newUrl = URL.createObjectURL(file);
+    setOriginalUrl((old) => {
+      if (old && old.startsWith('blob:')) {
+        try { URL.revokeObjectURL(old); } catch {}
+      }
+      return newUrl;
+    });
+  }, [file]);
 
   /* --------- Suche --------- */
 
@@ -212,7 +193,6 @@ export default function UploadPage() {
     const base = process.env.NEXT_PUBLIC_API_BASE ?? process.env.NEXT_PUBLIC_BACKEND_URL;
     if (!base) throw new Error('Konfiguration fehlt: NEXT_PUBLIC_API_BASE oder NEXT_PUBLIC_BACKEND_URL nicht gesetzt.');
 
-    // 60s Timeout gegen hängende Requests
     const ctrl = new AbortController();
     const to = window.setTimeout(() => ctrl.abort(), 60_000);
 
@@ -224,26 +204,12 @@ export default function UploadPage() {
         try {
           r = await fetch(`${base}${p}`, { method: 'POST', body: form, signal: ctrl.signal });
         } catch {
-          // Netzwerk/Timeout
           throw new Error('Netzwerkfehler – bitte überprüfe deine Verbindung und versuche es erneut.');
         }
-
-        if (r.ok) {
-          return r.json();
-        }
-
+        if (r.ok) return r.json();
         lastText = await r.text().catch(() => '');
-
-        // 503 = Suche temporär nicht verfügbar → freundliche Meldung
-        if (r.status === 503) {
-          throw new Error('Bildsuche kurz nicht verfügbar – bitte später erneut versuchen.');
-        }
-
-        // Wenn kein 404: harter Fehler mit Status
-        if (r.status !== 404) {
-          throw new Error(`${r.status} ${r.statusText} – ${lastText}`);
-        }
-        // 404 → versuche den nächsten Pfad
+        if (r.status === 503) throw new Error('Bildsuche kurz nicht verfügbar – bitte später erneut versuchen.');
+        if (r.status !== 404) throw new Error(`${r.status} ${r.statusText} – ${lastText}`);
       }
       throw new Error(`Kein Upload-Endpoint gefunden (404). Letzte Antwort: ${lastText}`);
     } finally {
@@ -252,17 +218,18 @@ export default function UploadPage() {
   }, []);
 
   const confirmAndSearch = useCallback(async () => {
-    if (!file || !imgRef.current || !crop) return;
+    const imgEl = modalImgRef.current!;
+    if (!file || !imgEl || !crop) return;
     try {
       setLoading(true);
       setError(null);
       setResults([]);
       setVisibleCount(12);
 
-      const px = toPixelCrop(crop, imgRef.current);
-      setCropPx(px); // für Preview
+      const px = toPixelCrop(crop, imgEl);
+      setCropPx(px);
 
-      const cropBlob = await getCroppedBlob(imgRef.current, px);
+      const cropBlob = await getCroppedBlob(imgEl, px);
       const cropUrl = URL.createObjectURL(cropBlob);
 
       if (cropPreviewUrl) URL.revokeObjectURL(cropPreviewUrl);
@@ -275,7 +242,6 @@ export default function UploadPage() {
       const hits = Array.isArray(data.results) ? data.results : [];
       setResults(hits);
       setModalOpen(false);
-      setEditInline(false);
       if (!hits.length) toast.show('Keine Treffer gefunden.', 'info');
       else toast.show(`${hits.length} Treffer gefunden.`, 'ok');
     } catch (e: unknown) {
@@ -305,11 +271,6 @@ export default function UploadPage() {
     }
   }
 
-  async function applyInlineAndSearch() {
-    if (!file || !imgRef.current || !crop) return;
-    await confirmAndSearch();
-  }
-
   /* --------- Shortcuts --------- */
 
   useEffect(() => {
@@ -337,15 +298,11 @@ export default function UploadPage() {
   const sortedResults = useMemo(() => {
     const arr = [...dedupedResults];
     switch (sortBy) {
-      case 'priceAsc':
-        arr.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity)); break;
-      case 'priceDesc':
-        arr.sort((a, b) => (b.price ?? -Infinity) - (a.price ?? -Infinity)); break;
-      case 'scoreDesc':
-        arr.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)); break;
-      case 'scoreAsc':
-        arr.sort((a, b) => (a.score ?? 0) - (b.score ?? 0)); break;
-      default: break; // relevance
+      case 'priceAsc': arr.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity)); break;
+      case 'priceDesc': arr.sort((a, b) => (b.price ?? -Infinity) - (a.price ?? -Infinity)); break;
+      case 'scoreDesc': arr.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)); break;
+      case 'scoreAsc': arr.sort((a, b) => (a.score ?? 0) - (b.score ?? 0)); break;
+      default: break;
     }
     return arr;
   }, [dedupedResults, sortBy]);
@@ -457,90 +414,56 @@ export default function UploadPage() {
         <main className="container mx-auto grid w-full max-w-screen-2xl grid-cols-1 gap-8 px-6 py-8 md:grid-cols-[320px_1fr] lg:grid-cols-[360px_1fr]">
           {/* LEFT SIDEBAR */}
           <aside className="md:sticky md:top-16">
-            {/* Crop-Panel */}
             <div className="rounded-2xl border bg-white/90 p-4 shadow-sm">
               <div className="text-sm font-medium text-gray-900">Gewählter Bereich</div>
 
-              {!editInline ? (
-                <div className="mt-3">
-                  {cropPreviewUrl ? (
-                    <div
-                      className="w-full rounded-lg border bg-white overflow-hidden"
-                      style={{ aspectRatio: cropPx ? `${cropPx.width} / ${cropPx.height}` : '1 / 1' }}
-                    >
-                      <img
-                        src={cropPreviewUrl}
-                        alt="Gewählter Bereich"
-                        className="h-full w-full object-contain"
-                        width={cropPx?.width ?? undefined}
-                        height={cropPx?.height ?? undefined}
-                        decoding="async"
-                        loading="eager"
-                      />
-                    </div>
-                  ) : (
-                    <div className="h-48 w-full rounded-lg border bg-gray-100" />
-                  )}
+              <div className="mt-3">
+                {cropPreviewUrl ? (
+                  <div
+                    className="w-full rounded-lg border bg-white overflow-hidden"
+                    style={{ aspectRatio: cropPx ? `${cropPx.width} / ${cropPx.height}` : '1 / 1' }}
+                  >
+                    <img
+                      src={cropPreviewUrl}
+                      alt="Gewählter Bereich"
+                      className="h-full w-full object-contain"
+                      width={cropPx?.width ?? undefined}
+                      height={cropPx?.height ?? undefined}
+                      decoding="async"
+                      loading="eager"
+                    />
+                  </div>
+                ) : (
+                  <div className="h-48 w-full rounded-lg border bg-gray-100" />
+                )}
 
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      onClick={() => setEditInline(true)}
-                      className="rounded-xl border px-3 py-1.5 text-sm hover:bg-gray-50"
-                    >
-                      Ausschnitt ändern
-                    </button>
-                    <button
-                      onClick={resubmitWithSameCrop}
-                      disabled={loading}
-                      className="rounded-xl bg-black px-4 py-1.5 text-sm font-medium text-white disabled:opacity-60"
-                    >
-                      Erneut suchen
-                    </button>
-                  </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => {
+                      // Sicherstellen, dass wir eine gültige URL haben
+                      if (!originalUrl) ensureImageUrl();
+                      setCrop(undefined); // wird im onLoad gesetzt
+                      setModalOpen(true);
+                    }}
+                    className="rounded-xl border px-3 py-1.5 text-sm hover:bg-gray-50"
+                  >
+                    Ausschnitt ändern
+                  </button>
+                  <button
+                    onClick={resubmitWithSameCrop}
+                    disabled={loading}
+                    className="rounded-xl bg-black px-4 py-1.5 text-sm font-medium text-white disabled:opacity-60"
+                  >
+                    Erneut suchen
+                  </button>
                 </div>
-              ) : (
-                <div className="mt-3">
-                  <div className="relative h-[360px] w-full overflow-auto rounded-xl border bg-gray-50">
-                    <ReactCrop
-                      crop={crop}
-                      onChange={(c: Crop) => setCrop(c)}
-                      keepSelection
-                      minWidth={10}
-                      minHeight={10}
-                    >
-                      <img
-                        ref={imgRef}
-                        src={originalUrl!}
-                        alt="Crop"
-                        className="mx-auto block h-full max-h-[360px] w-auto max-w-full object-contain"
-                      />
-                    </ReactCrop>
-                  </div>
-
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      onClick={() => setEditInline(false)}
-                      className="rounded-xl border px-3 py-1.5 text-sm hover:bg-gray-50"
-                    >
-                      Abbrechen
-                    </button>
-                    <button
-                      onClick={applyInlineAndSearch}
-                      disabled={loading}
-                      className="rounded-xl bg-black px-4 py-1.5 text-sm font-medium text-white disabled:opacity-60"
-                    >
-                      Zuschneiden &amp; Suchen
-                    </button>
-                  </div>
-                </div>
-              )}
+              </div>
             </div>
 
             {/* Filter-Panel */}
             <div className="mt-6 rounded-2xl border bg-white/90 p-4 shadow-sm">
               <div className="text-sm font-medium text-gray-900">Filter</div>
 
-              {/* Ähnlichkeitsgrad */}
               <div className="mt-3 space-y-2">
                 {(['Exact', 'Sehr ähnlich', 'Alternative'] as const).map((k) => (
                   <label key={k} className="flex items-center gap-2 text-sm">
@@ -556,7 +479,6 @@ export default function UploadPage() {
                 ))}
               </div>
 
-              {/* Preis */}
               <div className="mt-4">
                 <div className="text-xs font-medium text-gray-700">Preis</div>
                 <div className="mt-2 flex items-center gap-2">
@@ -580,7 +502,6 @@ export default function UploadPage() {
                 </div>
               </div>
 
-              {/* Händler */}
               <div className="mt-4">
                 <div className="text-xs font-medium text-gray-700">Händler</div>
                 <input
@@ -592,7 +513,6 @@ export default function UploadPage() {
                 />
               </div>
 
-              {/* Reset */}
               <div className="mt-4">
                 <button
                   onClick={() => { setLabelFilter({ Exact: true, 'Sehr ähnlich': true, Alternative: true }); setPriceMin(''); setPriceMax(''); setMerchantSearch(''); }}
@@ -616,7 +536,6 @@ export default function UploadPage() {
               </h2>
 
               <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-3">
-                {/* Badges */}
                 <div className="flex flex-wrap gap-2">
                   {activeBadgeLabels && (
                     <button
@@ -660,7 +579,6 @@ export default function UploadPage() {
                   )}
                 </div>
 
-                {/* Sort */}
                 <div className="flex items-center gap-2">
                   <label htmlFor="sort" className="text-sm text-gray-600">Sortieren:</label>
                   <select
@@ -775,52 +693,77 @@ export default function UploadPage() {
         </main>
       )}
 
-      {/* Erstes Zuschneiden im Modal */}
-      <div className={`fixed inset-0 z-50 ${modalOpen ? '' : 'hidden'}`}>
-        <div className="absolute inset-0 bg-black/60" onClick={() => setModalOpen(false)} />
-        <div className="absolute left-1/2 top-1/2 w-[95vw] max-w-3xl -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white shadow-2xl">
-          <div className="border-b px-6 py-4 text-center">
-            <h3 className="text-lg font-semibold text-gray-900">Bild zuschneiden</h3>
-            <p className="mt-1 text-sm text-gray-500">
-              Ziehe die runden Griffe. <kbd className="rounded bg-gray-100 px-1">Esc</kbd> schließt,
-              <kbd className="rounded bg-gray-100 px-1">Enter</kbd> startet die Suche.
-            </p>
-          </div>
+      {/* Zuschneiden im Modal */}
+      {modalOpen && (
+        <div className="fixed inset-0 z-50">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setModalOpen(false)} />
+          <div className="absolute left-1/2 top-1/2 w-[95vw] max-w-3xl -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-white shadow-2xl">
+            <div className="border-b px-6 py-4 text-center">
+              <h3 className="text-lg font-semibold text-gray-900">Bild zuschneiden</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                Ziehe die runden Griffe. <kbd className="rounded bg-gray-100 px-1">Esc</kbd> schließt,
+                <kbd className="rounded bg-gray-100 px-1">Enter</kbd> startet die Suche.
+              </p>
+            </div>
 
-          <div className="px-6 py-5">
-            {originalUrl ? (
-              <div className="relative mx-auto max-h-[70vh] w-full overflow-auto rounded-xl border bg-gray-50">
-                <ReactCrop crop={crop} onChange={(c: Crop) => setCrop(c)} keepSelection minWidth={10} minHeight={10}>
-                  <img
-                    ref={imgRef}
-                    src={originalUrl}
-                    alt="Crop"
-                    className="mx-auto block h-auto max-h-[70vh] max-w-full object-contain"
-                  />
-                </ReactCrop>
-              </div>
-            ) : (
-              <div className="text-sm text-gray-500 text-center">Bitte ein Bild wählen.</div>
-            )}
-          </div>
+            <div className="px-6 py-5">
+              {originalUrl ? (
+                <div className="relative mx-auto h-[70vh] w-full overflow-auto rounded-xl border bg-gray-50 flex items-center justify-center">
+                  <ReactCrop
+                    crop={crop}
+                    onChange={(c: Crop) => setCrop(c)}
+                    keepSelection
+                    minWidth={10}
+                    minHeight={10}
+                  >
+                    <img
+                      ref={modalImgRef}
+                      src={originalUrl}
+                      alt="Crop"
+                      className="block w-auto max-w-full h-auto max-h-[68vh] object-contain"
+                      decoding="async"
+                      loading="eager"
+                      onLoad={(e) => {
+                        const img = e.currentTarget;
+                        if (!naturalSize) setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
+                        if (!crop) {
+                          if (cropPx) {
+                            setCrop(pixelToPercentCropWithSize(cropPx, img.naturalWidth, img.naturalHeight));
+                          } else {
+                            setCrop({ unit: '%', x: 12, y: 12, width: 76, height: 76 });
+                          }
+                        }
+                      }}
+                      onError={() => {
+                        // Falls die ObjectURL ungültig wurde → sofort neu erzeugen
+                        ensureImageUrl();
+                      }}
+                    />
+                  </ReactCrop>
+                </div>
+              ) : (
+                <div className="text-sm text-gray-500 text-center">Bitte ein Bild wählen.</div>
+              )}
+            </div>
 
-          <div className="flex items-center justify-center gap-3 border-t px-6 py-4">
-            <button
-              onClick={() => setModalOpen(false)}
-              className="rounded-xl border px-5 py-2.5 text-base font-medium hover:bg-gray-50"
-            >
-              Abbrechen
-            </button>
-            <button
-              onClick={confirmAndSearch}
-              disabled={loading || !file}
-              className="rounded-xl bg-black px-6 py-3 text-base font-semibold text-white shadow hover:bg-gray-900 disabled:opacity-60"
-            >
-              {loading ? 'Suchen…' : '✔︎ Zuschneiden & Suchen'}
-            </button>
+            <div className="flex items-center justify-center gap-3 border-t px-6 py-4">
+              <button
+                onClick={() => setModalOpen(false)}
+                className="rounded-xl border px-5 py-2.5 text-base font-medium hover:bg-gray-50"
+              >
+                Abbrechen
+              </button>
+              <button
+                onClick={confirmAndSearch}
+                disabled={loading || !file}
+                className="rounded-xl bg-black px-6 py-3 text-base font-semibold text-white shadow hover:bg-gray-900 disabled:opacity-60"
+              >
+                {loading ? 'Suchen…' : '✔︎ Zuschneiden & Suchen'}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </>
   );
 }
