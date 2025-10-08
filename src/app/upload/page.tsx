@@ -53,13 +53,35 @@ async function getCroppedBlob(img: HTMLImageElement, crop: PixelCrop): Promise<B
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(crop.width));
   canvas.height = Math.max(1, Math.round(crop.height));
+
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas context not available');
-  (ctx as any).imageSmoothingEnabled = true;
-  (ctx as any).imageSmoothingQuality = 'high';
-  ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
-  return await new Promise<Blob>((res) => canvas.toBlob((b) => res(b as Blob), 'image/jpeg', 0.92));
+
+  // Typsichere Erweiterung ohne "any"
+  type SmoothCtx = CanvasRenderingContext2D & {
+    imageSmoothingEnabled?: boolean;
+    imageSmoothingQuality?: 'low' | 'medium' | 'high';
+  };
+  const sctx = ctx as SmoothCtx;
+
+  if (typeof sctx.imageSmoothingEnabled !== 'undefined') {
+    sctx.imageSmoothingEnabled = true;
+  }
+  if (typeof sctx.imageSmoothingQuality !== 'undefined') {
+    sctx.imageSmoothingQuality = 'high';
+  }
+
+  ctx.drawImage(
+    img,
+    crop.x, crop.y, crop.width, crop.height,
+    0, 0, canvas.width, canvas.height
+  );
+
+  return await new Promise<Blob>((res) =>
+    canvas.toBlob((b) => res(b as Blob), 'image/jpeg', 0.92)
+  );
 }
+
 
 const fmtPrice = (value?: number, currency = 'EUR', locale = 'de-DE') =>
   typeof value === 'number'
