@@ -219,7 +219,7 @@ export default function UploadPage() {
     const to = window.setTimeout(() => ctrl.abort(), 60_000);
 
     try {
-      const paths = ['/search/by-upload', '/search/image'];
+      const paths = ['/search/by-upload-db', '/search/image'];
       let lastText = '';
       for (const p of paths) {
         let r: Response;
